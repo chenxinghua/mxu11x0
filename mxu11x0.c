@@ -335,8 +335,7 @@ static int mxu1_download_firmware(struct usb_serial *serial,
 	}
 
 	msleep_interruptible(100);
-
-	status = mxu1_send_ctrl_urb(serial, MXU1_RESET_EXT_DEVICE, 0, 0);
+	usb_reset_device(dev);
 
 	dev_dbg(&dev->dev, "%s - download successful (%d)\n", __func__, status);
 
@@ -400,6 +399,7 @@ static int mxu1_startup(struct usb_serial *serial)
 	char fw_name[32];
 	const struct firmware *fw_p = NULL;
 	int err;
+	int status = 0;
 
 	dev_dbg(&dev->dev, "%s - product 0x%4X, num configurations %d, configuration value %d\n",
 		__func__, le16_to_cpu(dev->descriptor.idProduct),
@@ -441,10 +441,11 @@ static int mxu1_startup(struct usb_serial *serial)
 			return err;
 		}
 
+		status = -ENODEV;
 		release_firmware(fw_p);
 	}
 
-	return 0;
+	return status;
 }
 
 static int mxu1_write_byte(struct usb_serial_port *port, u32 addr,
