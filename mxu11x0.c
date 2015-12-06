@@ -218,7 +218,7 @@ struct mxu1_port {
 	u8 mcr;
 	u8 uart_types;
 	u8 uart_mode;
-	spinlock_t spinlock;    /* Protects msr */
+	spinlock_t spinlock; /* Protects msr */
 	struct mutex mutex; /* Protects mcr */
 	bool send_break;
 };
@@ -432,7 +432,7 @@ static int mxu1_startup(struct usb_serial *serial)
 			return err;
 		}
 
-		status = 1;
+		status = -ENODEV;
 		release_firmware(fw_p);
 	}
 
