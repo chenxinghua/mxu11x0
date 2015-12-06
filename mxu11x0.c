@@ -432,7 +432,7 @@ static int mxu1_startup(struct usb_serial *serial)
 			return err;
 		}
 
-		status = -ENODEV;
+		status = 1;
 		release_firmware(fw_p);
 	}
 
@@ -493,8 +493,6 @@ static void mxu1_set_termios(struct tty_struct *tty,
 	speed_t baud;
 	int status;
 	unsigned int mcr;
-
-	dev_dbg(&port->dev, "%s\n", __func__);
 
 	cflag = tty->termios.c_cflag;
 	iflag = tty->termios.c_iflag;
@@ -642,10 +640,7 @@ static int mxu1_ioctl_set_rs485(struct usb_serial_port *port,
 				struct serial_rs485 __user *rs485_user)
 {
 	struct serial_rs485 rs485;
-	struct mxu1_device *mxdev;
 	int status = 0;
-
-	mxdev = usb_get_serial_data(port->serial);
 
 	if (copy_from_user(&rs485, rs485_user, sizeof(*rs485_user)))
 		return -EFAULT;
@@ -677,7 +672,6 @@ static int mxu1_ioctl_set_rs485(struct usb_serial_port *port,
 }
 
 static int mxu1_get_serial_info(struct usb_serial_port *port,
-				struct mxu1_port *mxport,
 				struct serial_struct __user *ret_arg)
 {
 	struct serial_struct ret_serial;
@@ -708,7 +702,6 @@ static int mxu1_get_serial_info(struct usb_serial_port *port,
 
 
 static int mxu1_set_serial_info(struct usb_serial_port *port,
-				struct mxu1_port *mxport,
 				struct serial_struct __user *new_arg)
 {
 	struct serial_struct new_serial;
@@ -734,10 +727,10 @@ static int mxu1_ioctl(struct tty_struct *tty,
 
 	switch (cmd) {
 	case TIOCGSERIAL:
-		return mxu1_get_serial_info(port, mxport,
+		return mxu1_get_serial_info(port,
 					    (struct serial_struct __user *)arg);
 	case TIOCSSERIAL:
-		return mxu1_set_serial_info(port, mxport,
+		return mxu1_set_serial_info(port,
 					    (struct serial_struct __user *)arg);
 	case TIOCGRS485:
 		return mxu1_ioctl_get_rs485(mxport,
@@ -758,8 +751,6 @@ static int mxu1_tiocmget(struct tty_struct *tty)
 	unsigned int msr;
 	unsigned int mcr;
 	unsigned long flags;
-
-	dev_dbg(&port->dev, "%s\n", __func__);
 
 	mutex_lock(&mxport->mutex);
 	spin_lock_irqsave(&mxport->spinlock, flags);
@@ -791,8 +782,6 @@ static int mxu1_tiocmset(struct tty_struct *tty,
 	int err;
 	unsigned int mcr;
 
-	dev_dbg(&port->dev, "%s\n", __func__);
-
 	mutex_lock(&mxport->mutex);
 	mcr = mxport->mcr;
 
@@ -823,8 +812,6 @@ static void mxu1_break(struct tty_struct *tty, int break_state)
 {
 	struct usb_serial_port *port = tty->driver_data;
 	struct mxu1_port *mxport = usb_get_serial_port_data(port);
-
-	dev_dbg(&port->dev, "%s - state = %d\n", __func__, break_state);
 
 	if (break_state == -1)
 		mxport->send_break = true;
@@ -939,8 +926,6 @@ static void mxu1_close(struct usb_serial_port *port)
 {
 	int status;
 
-	dev_dbg(&port->dev, "%s\n", __func__);
-
 	usb_serial_generic_close(port);
 	usb_kill_urb(port->interrupt_in_urb);
 
@@ -989,8 +974,6 @@ static void mxu1_interrupt_callback(struct urb *urb)
 	u8 msr;
 
 	mxport = usb_get_serial_port_data(port);
-
-	dev_dbg(&port->dev, "%s\n", __func__);
 
 	switch (urb->status) {
 	case 0:
