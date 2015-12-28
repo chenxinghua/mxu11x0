@@ -134,11 +134,6 @@
 #define MXU1_UART_485_RECEIVER_DISABLED		0x01
 #define MXU1_UART_485_RECEIVER_ENABLED		0x02
 
-/* Supported operation types */
-#define MXU1_TYPE_RS232				BIT(0)
-#define MXU1_TYPE_RS422				BIT(1)
-#define MXU1_TYPE_RS485				BIT(2)
-
 /* Pipe transfer mode and timeout */
 #define MXU1_PIPE_MODE_CONTINUOUS		0x01
 #define MXU1_PIPE_MODE_MASK			0x03
@@ -358,19 +353,13 @@ static int mxu1_port_probe(struct usb_serial_port *port)
 
 	switch (mxdev->mxd_model) {
 	case MXU1_1110_PRODUCT_ID:
-		mxport->uart_types = MXU1_TYPE_RS232;
+	case MXU1_1150_PRODUCT_ID:
+	case MXU1_1151_PRODUCT_ID:
 		mxport->uart_mode = MXU1_UART_232;
 		break;
 	case MXU1_1130_PRODUCT_ID:
 	case MXU1_1131_PRODUCT_ID:
-		mxport->uart_types = MXU1_TYPE_RS422 | MXU1_TYPE_RS485;
 		mxport->uart_mode = MXU1_UART_485_RECEIVER_DISABLED;
-		break;
-	case MXU1_1150_PRODUCT_ID:
-	case MXU1_1151_PRODUCT_ID:
-		mxport->uart_types =
-			MXU1_TYPE_RS232 | MXU1_TYPE_RS422 | MXU1_TYPE_RS485;
-		mxport->uart_mode = MXU1_UART_232;
 		break;
 	}
 
@@ -427,8 +416,8 @@ static int mxu1_startup(struct usb_serial *serial)
 
 		err = mxu1_download_firmware(serial, fw_p);
 		if (err) {
-			kfree(mxdev);
 			release_firmware(fw_p);
+			kfree(mxdev);
 			return err;
 		}
 
@@ -619,58 +608,6 @@ static void mxu1_set_termios(struct tty_struct *tty,
 	kfree(config);
 }
 
-static int mxu1_ioctl_get_rs485(struct mxu1_port *mxport,
-				struct serial_rs485 __user *rs485)
-{
-	struct serial_rs485 aux;
-
-	memset(&aux, 0, sizeof(aux));
-
-	if (mxport->uart_mode == MXU1_UART_485_RECEIVER_ENABLED)
-		aux.flags = SER_RS485_ENABLED;
-
-	if (copy_to_user(rs485, &aux, sizeof(aux)))
-		return -EFAULT;
-
-	return 0;
-}
-
-static int mxu1_ioctl_set_rs485(struct usb_serial_port *port,
-				struct mxu1_port *mxport,
-				struct serial_rs485 __user *rs485_user)
-{
-	struct serial_rs485 rs485;
-	int status = 0;
-
-	if (copy_from_user(&rs485, rs485_user, sizeof(*rs485_user)))
-		return -EFAULT;
-
-	if (mxport->uart_types & (MXU1_TYPE_RS422 | MXU1_TYPE_RS485)) {
-
-		if (rs485.flags & SER_RS485_ENABLED) {
-			mxport->uart_mode = MXU1_UART_485_RECEIVER_ENABLED;
-		} else {
-			if (mxport->uart_types & MXU1_TYPE_RS232)
-				mxport->uart_mode = MXU1_UART_232;
-			else
-				mxport->uart_mode =
-						MXU1_UART_485_RECEIVER_DISABLED;
-		}
-	} else {
-		dev_err(&port->dev, "RS485 not supported by this device\n");
-		status = -EINVAL;
-	}
-
-	memset(&rs485, 0, sizeof(rs485));
-	if (mxport->uart_mode & MXU1_UART_485_RECEIVER_ENABLED)
-		rs485.flags = SER_RS485_ENABLED;
-
-	if (copy_to_user(rs485_user, &rs485, sizeof(rs485)))
-		return -EFAULT;
-
-	return status;
-}
-
 static int mxu1_get_serial_info(struct usb_serial_port *port,
 				struct serial_struct __user *ret_arg)
 {
@@ -732,12 +669,6 @@ static int mxu1_ioctl(struct tty_struct *tty,
 	case TIOCSSERIAL:
 		return mxu1_set_serial_info(port,
 					    (struct serial_struct __user *)arg);
-	case TIOCGRS485:
-		return mxu1_ioctl_get_rs485(mxport,
-					    (struct serial_rs485 __user *)arg);
-	case TIOCSRS485:
-		return mxu1_ioctl_set_rs485(port, mxport,
-					    (struct serial_rs485 __user *)arg);
 	}
 
 	return -ENOIOCTLCMD;
@@ -825,7 +756,6 @@ static int mxu1_open(struct tty_struct *tty, struct usb_serial_port *port)
 {
 	struct mxu1_port *mxport = usb_get_serial_port_data(port);
 	struct usb_serial *serial = port->serial;
-	struct urb *urb;
 	int status;
 	u16 open_settings;
 
@@ -836,8 +766,7 @@ static int mxu1_open(struct tty_struct *tty, struct usb_serial_port *port)
 	mxport->msr = 0;
 
 	dev_dbg(&port->dev, "%s - start interrupt in urb\n", __func__);
-	urb = port->interrupt_in_urb;
-	status = usb_submit_urb(urb, GFP_KERNEL);
+	status = usb_submit_urb(port->interrupt_in_urb, GFP_KERNEL);
 	if (status) {
 		dev_err(&port->dev, "failed to submit interrupt urb: %d\n",
 			status);
@@ -936,13 +865,15 @@ static void mxu1_close(struct usb_serial_port *port)
 			status);
 }
 
-static void mxu1_handle_new_msr(struct usb_serial_port *port,
-				struct mxu1_port *mxport, u8 msr)
+static void mxu1_handle_new_msr(struct usb_serial_port *port, u8 msr)
 {
 	struct async_icount *icount;
+	struct mxu1_port *mxport;
 	unsigned long flags;
 
 	dev_dbg(&port->dev, "%s - msr 0x%02X\n", __func__, msr);
+
+	mxport = usb_get_serial_port_data(port);
 
 	spin_lock_irqsave(&mxport->spinlock, flags);
 	mxport->msr = msr & MXU1_MSR_MASK;
@@ -966,14 +897,11 @@ static void mxu1_handle_new_msr(struct usb_serial_port *port,
 static void mxu1_interrupt_callback(struct urb *urb)
 {
 	struct usb_serial_port *port = urb->context;
-	struct mxu1_port *mxport;
 	unsigned char *data = urb->transfer_buffer;
 	int length = urb->actual_length;
 	int function;
 	int status;
 	u8 msr;
-
-	mxport = usb_get_serial_port_data(port);
 
 	switch (urb->status) {
 	case 0:
@@ -1015,7 +943,7 @@ static void mxu1_interrupt_callback(struct urb *urb)
 
 	case MXU1_CODE_MODEM_STATUS:
 		msr = data[1];
-		mxu1_handle_new_msr(port, mxport, msr);
+		mxu1_handle_new_msr(port, msr);
 		break;
 
 	default:
