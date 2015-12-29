@@ -211,7 +211,6 @@ struct mxu1_firmware_header {
 struct mxu1_port {
 	u8 msr;
 	u8 mcr;
-	u8 uart_types;
 	u8 uart_mode;
 	spinlock_t spinlock; /* Protects msr */
 	struct mutex mutex; /* Protects mcr */
@@ -660,7 +659,6 @@ static int mxu1_ioctl(struct tty_struct *tty,
 		      unsigned int cmd, unsigned long arg)
 {
 	struct usb_serial_port *port = tty->driver_data;
-	struct mxu1_port *mxport = usb_get_serial_port_data(port);
 
 	switch (cmd) {
 	case TIOCGSERIAL:
