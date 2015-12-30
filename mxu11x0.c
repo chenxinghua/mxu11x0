@@ -272,7 +272,8 @@ static int mxu1_send_ctrl_urb(struct usb_serial *serial,
 }
 
 static int mxu1_download_firmware(struct usb_serial *serial,
-				  const struct firmware *fw_p)
+				  const struct firmware *fw_p,
+				  int endpoint)
 {
 	int status = 0;
 	int buffer_size;
@@ -285,7 +286,7 @@ static int mxu1_download_firmware(struct usb_serial *serial,
 	struct mxu1_firmware_header *header;
 	unsigned int pipe;
 
-	pipe = usb_sndbulkpipe(dev, serial->port[0]->bulk_out_endpointAddress);
+	pipe = usb_sndbulkpipe(dev, endpoint);
 
 	buffer_size = fw_p->size + sizeof(*header);
 	buffer = kmalloc(buffer_size, GFP_KERNEL);
@@ -335,15 +336,82 @@ static void mxu1_release(struct usb_serial *serial)
 	kfree(mxdev);
 }
 
+static int mxu1_probe(struct usb_serial *serial, const struct usb_device_id *id)
+{
+	struct usb_host_interface *cur_altsetting;
+	char fw_name[32];
+	const struct firmware *fw_p = NULL;
+	struct usb_device *dev = serial->dev;
+	u16 model;
+	int err;
+	struct usb_endpoint_descriptor *endpoint, *interrupt_in, *bulk_out;
+	int i;
+
+	dev_dbg(&serial->interface->dev, "%s - product 0x%04X, num configurations %d, configuration value %d\n",
+		__func__, le16_to_cpu(dev->descriptor.idProduct),
+		dev->descriptor.bNumConfigurations,
+		dev->actconfig->desc.bConfigurationValue);
+
+	cur_altsetting = serial->interface->cur_altsetting;
+	interrupt_in = NULL;
+	bulk_out = NULL;
+
+	for (i = 0; i < cur_altsetting->desc.bNumEndpoints; i++) {
+		endpoint = &cur_altsetting->endpoint[i].desc;
+		if (usb_endpoint_is_bulk_out(endpoint)) {
+			dev_dbg(&serial->interface->dev,
+				"found bulk out on endpoint %d\n", i);
+			bulk_out = endpoint;
+		}
+
+		if (usb_endpoint_is_int_in(endpoint)) {
+			dev_dbg(&serial->interface->dev,
+				"found interrupt in on endpoint %d\n", i);
+			interrupt_in = endpoint;
+		}
+	}
+
+	/* if we have only 1 bulk out endpoint, download firmware */
+	if (bulk_out && (cur_altsetting->desc.bNumEndpoints == 1)) {
+
+		model = le16_to_cpu(dev->descriptor.idProduct);
+		snprintf(fw_name,
+			 sizeof(fw_name),
+			 "moxa/moxa-%04x.fw",
+			 model);
+
+		err = request_firmware(&fw_p, fw_name, &serial->interface->dev);
+		if (err) {
+			dev_err(&serial->interface->dev, "failed to request firmware: %d\n",
+				err);
+			return -ENODEV;
+		}
+
+		err = mxu1_download_firmware(serial, fw_p, bulk_out->bEndpointAddress);
+		if (err)
+			goto err_release_firmware;
+
+		/* device is being reset */
+		err = -ENODEV;
+		goto err_release_firmware;
+
+	} else if (!interrupt_in) {
+		/* firmware is already loaded but there is no interrupt endpoint */
+		dev_err(&serial->interface->dev, "no interrupt urb\n");
+		return -ENODEV;
+	}
+
+	return 0;
+
+err_release_firmware:
+	release_firmware(fw_p);
+	return err;
+}
+
 static int mxu1_port_probe(struct usb_serial_port *port)
 {
 	struct mxu1_port *mxport;
 	struct mxu1_device *mxdev;
-
-	if (!port->interrupt_in_urb) {
-		dev_err(&port->dev, "no interrupt urb\n");
-		return -ENODEV;
-	}
 
 	mxport = kzalloc(sizeof(struct mxu1_port), GFP_KERNEL);
 	if (!mxport)
@@ -388,16 +456,6 @@ static int mxu1_port_remove(struct usb_serial_port *port)
 static int mxu1_startup(struct usb_serial *serial)
 {
 	struct mxu1_device *mxdev;
-	struct usb_device *dev = serial->dev;
-	struct usb_host_interface *cur_altsetting;
-	char fw_name[32];
-	const struct firmware *fw_p = NULL;
-	int err;
-
-	dev_dbg(&serial->interface->dev, "%s - product 0x%04X, num configurations %d, configuration value %d\n",
-		__func__, le16_to_cpu(dev->descriptor.idProduct),
-		dev->descriptor.bNumConfigurations,
-		dev->actconfig->desc.bConfigurationValue);
 
 	/* create device structure */
 	mxdev = kzalloc(sizeof(struct mxu1_device), GFP_KERNEL);
@@ -406,42 +464,7 @@ static int mxu1_startup(struct usb_serial *serial)
 
 	usb_set_serial_data(serial, mxdev);
 
-	mxdev->mxd_model = le16_to_cpu(dev->descriptor.idProduct);
-
-	cur_altsetting = serial->interface->cur_altsetting;
-
-	/* if we have only 1 configuration, download firmware */
-	if (cur_altsetting->desc.bNumEndpoints == 1) {
-
-		snprintf(fw_name,
-			 sizeof(fw_name),
-			 "moxa/moxa-%04x.fw",
-			 mxdev->mxd_model);
-
-		err = request_firmware(&fw_p, fw_name, &serial->interface->dev);
-		if (err) {
-			dev_err(&serial->interface->dev, "failed to request firmware: %d\n",
-				err);
-			goto err_free_mxdev;
-		}
-
-		err = mxu1_download_firmware(serial, fw_p);
-		if (err)
-			goto err_release_firmware;
-
-		/* device is being reset */
-		err = -ENODEV;
-		goto err_release_firmware;
-	}
-
 	return 0;
-
-err_release_firmware:
-	release_firmware(fw_p);
-err_free_mxdev:
-	kfree(mxdev);
-
-	return err;
 }
 
 static int mxu1_write_byte(struct usb_serial_port *port, u32 addr,
@@ -822,30 +845,6 @@ static int mxu1_open(struct tty_struct *tty, struct usb_serial_port *port)
 		goto unlink_int_urb;
 	}
 
-	/*
-	 * reset the data toggle on the bulk endpoints to work around bug in
-	 * host controllers where things get out of sync some times
-	 */
-	usb_clear_halt(serial->dev, port->write_urb->pipe);
-	usb_clear_halt(serial->dev, port->read_urb->pipe);
-
-	if (tty)
-		mxu1_set_termios(tty, port, NULL);
-
-	status = mxu1_send_ctrl_urb(serial, MXU1_OPEN_PORT,
-				    open_settings, MXU1_UART1_PORT);
-	if (status) {
-		dev_err(&port->dev, "cannot send open command: %d\n", status);
-		goto unlink_int_urb;
-	}
-
-	status = mxu1_send_ctrl_urb(serial, MXU1_START_PORT,
-				    0, MXU1_UART1_PORT);
-	if (status) {
-		dev_err(&port->dev, "cannot send start command: %d\n", status);
-		goto unlink_int_urb;
-	}
-
 	status = usb_serial_generic_open(tty, port);
 	if (status)
 		goto unlink_int_urb;
@@ -864,6 +863,13 @@ static void mxu1_close(struct usb_serial_port *port)
 
 	usb_serial_generic_close(port);
 	usb_kill_urb(port->interrupt_in_urb);
+
+	status = mxu1_send_ctrl_urb(port->serial, MXU1_STOP_PORT,
+				    0, MXU1_UART1_PORT);
+	if (status) {
+		dev_err(&port->dev, "failed to send stop port command: %d\n",
+			status);
+	}
 
 	status = mxu1_send_ctrl_urb(port->serial, MXU1_CLOSE_PORT,
 				    0, MXU1_UART1_PORT);
@@ -973,6 +979,7 @@ static struct usb_serial_driver mxu11x0_device = {
 	.description		= "MOXA UPort 11x0",
 	.id_table		= mxu1_idtable,
 	.num_ports		= 1,
+	.probe                  = mxu1_probe,
 	.port_probe             = mxu1_port_probe,
 	.port_remove            = mxu1_port_remove,
 	.attach			= mxu1_startup,
