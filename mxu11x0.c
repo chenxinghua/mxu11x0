@@ -273,7 +273,7 @@ static int mxu1_send_ctrl_urb(struct usb_serial *serial,
 
 static int mxu1_download_firmware(struct usb_serial *serial,
 				  const struct firmware *fw_p,
-				  int endpoint)
+				  struct usb_endpoint_descriptor *endpoint)
 {
 	int status = 0;
 	int buffer_size;
@@ -286,7 +286,7 @@ static int mxu1_download_firmware(struct usb_serial *serial,
 	struct mxu1_firmware_header *header;
 	unsigned int pipe;
 
-	pipe = usb_sndbulkpipe(dev, endpoint);
+	pipe = usb_sndbulkpipe(dev, endpoint->bEndpointAddress);
 
 	buffer_size = fw_p->size + sizeof(*header);
 	buffer = kmalloc(buffer_size, GFP_KERNEL);
@@ -387,7 +387,7 @@ static int mxu1_probe(struct usb_serial *serial, const struct usb_device_id *id)
 			return -ENODEV;
 		}
 
-		err = mxu1_download_firmware(serial, fw_p, bulk_out->bEndpointAddress);
+		err = mxu1_download_firmware(serial, fw_p, bulk_out);
 		if (err)
 			goto err_release_firmware;
 
@@ -396,8 +396,10 @@ static int mxu1_probe(struct usb_serial *serial, const struct usb_device_id *id)
 		goto err_release_firmware;
 
 	} else if (!interrupt_in) {
-		/* firmware is already loaded but there is no interrupt endpoint */
-		dev_err(&serial->interface->dev, "no interrupt urb\n");
+		/* firmware is already loaded but there is
+		 * no interrupt in endpoint available
+		 */
+		dev_err(&serial->interface->dev, "no interrupt endpoint\n");
 		return -ENODEV;
 	}
 
