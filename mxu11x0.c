@@ -331,8 +331,9 @@ static int mxu1_download_firmware(struct usb_serial *serial,
 
 static void mxu1_release(struct usb_serial *serial)
 {
-	struct mxu1_device *mxdev = usb_get_serial_data(serial);
+	struct mxu1_device *mxdev;
 
+	mxdev = usb_get_serial_data(serial);
 	kfree(mxdev);
 }
 
